@@ -1,27 +1,35 @@
-// middleware.ts -> The Vercel Shield: A Simple, Configurable Firewall (Definitive Version)
+// middleware.ts -> The Vercel Shield: A Production-Ready Firewall
+// This middleware provides a robust, layered defense against automated abuse
+// and the rate-limit bypass vulnerability.
+
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { kv } from '@vercel/kv';
 
 // --- MAIN CONFIGURATION ---
-// tweak these settings to your needs
+// Tweak these settings to protect your application.
 const FIREWALL_CONFIG = {
   
-  // block all requests coming from any cloudflare worker?
-  blockWorkers: {
-    enabled: false, 
-  },
-
-  // rate limit settings
-  rateLimit: {
-    enabled: true,
-    // how many requests are allowed...
-    limit: 20,
+  // A smart rate limit for all untrusted public traffic.
+  ipRateLimit: {
+    // How many requests are allowed...
+    limit: 30,
     // ...in this time window (in seconds).
-    window: 15, 
+    window: 20, 
   },
 
-  // an array of paths to exclude from the firewall.
+  // A list of secret tokens for your trusted services.
+  // Any request with 'Authorization: Bearer <token>' where the token is in this list
+  // will be considered TRUSTED and will BYPASS the IP rate limit.
+  // Generate these with a password manager and keep them secret.
+  trustedSecrets: [
+    'k$tF_8#Z!pQvY7@eR_wJ6x*uG9hL4m&', // Secret for my own Cloudflare Worker
+    's3C!bN_9^zP_qR$tW*vXyZ_2&4@6*8(0', // Secret for Stripe Webhooks
+  ],
+
+  // An array of paths to exclude from all firewall protections.
+  // Example: ['/', '/about']
+  // Leave empty to protect all paths.
   allowedPaths: [] as string[], 
 
 };
@@ -30,46 +38,43 @@ const FIREWALL_CONFIG = {
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
   
+  // 1. First, check if the path is globally allowed.
   if (FIREWALL_CONFIG.allowedPaths.includes(pathname)) {
     return NextResponse.next();
   }
 
-  if (FIREWALL_CONFIG.blockWorkers.enabled && req.headers.has('cf-worker')) {
-    return new NextResponse('Forbidden: Direct worker access is not permitted.', { status: 403 });
+  // 2. Next, check for a valid trusted secret (the "VIP Pass").
+  const authHeader = req.headers.get('Authorization') ?? '';
+  const token = authHeader.replace('Bearer ', '');
+  if (FIREWALL_CONFIG.trustedSecrets.includes(token)) {
+    // This is a trusted service. Let it pass without checking the IP rate limit.
+    return NextResponse.next();
   }
 
-  if (FIREWALL_CONFIG.rateLimit.enabled) {
-    const ip = req.headers.get('cf-connecting-ip') ?? req.headers.get('x-forwarded-for') ?? '127.0.0.1';
-    const key = `ratelimit:${ip}`;
+  // 3. If it's not a trusted service, treat it as public traffic and enforce the IP rate limit.
+  const ip = req.headers.get('cf-connecting-ip') ?? req.headers.get('x-forwarded-for') ?? '127.0.0.1';
+  const key = `ratelimit:${ip}`;
 
-    try {
-      // --- THE DEFINITIVE FIX IS HERE ---
-      // This is the most robust and type-safe pattern for rate limiting.
-      
-      // 1. Increment the counter for the IP. This is an atomic operation.
-      //    It returns the new value of the counter.
-      const currentRequests = await kv.incr(key);
+  try {
+    const currentRequests = await kv.incr(key);
 
-      // 2. If this is the first request, set the expiration for the key.
-      //    This creates our "time window".
-      if (currentRequests === 1) {
-        await kv.expire(key, FIREWALL_CONFIG.rateLimit.window);
-      }
-
-      // 3. Now, check if the count has exceeded the limit.
-      if (currentRequests > FIREWALL_CONFIG.rateLimit.limit) {
-        return new NextResponse('Rate limit exceeded. Please try again later.', { status: 429 });
-      }
-      
-    } catch (error) {
-      console.error("Vercel Shield: Could not connect to KV store for rate limiting.", error);
+    if (currentRequests === 1) {
+      await kv.expire(key, FIREWALL_CONFIG.ipRateLimit.window);
     }
+
+    if (currentRequests > FIREWALL_CONFIG.ipRateLimit.limit) {
+      return new NextResponse('Rate limit exceeded.', { status: 429 });
+    }
+  } catch (error) {
+    // If the KV store is down, it's safer to let traffic through.
+    console.error("Vercel Shield: KV store error.", error);
   }
   
+  // 4. If all checks pass, allow the request.
   return NextResponse.next();
 }
 
-// this tells the middleware to only run on every request
+// this tells the middleware to run on every request except for static files.
 export const config = {
   matcher: '/((?!_next/static|_next/image|favicon.ico).*)',
 };
