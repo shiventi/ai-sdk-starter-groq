@@ -9,7 +9,7 @@ const FIREWALL_CONFIG = {
   
   // block all requests coming from any cloudflare worker?
   blockWorkers: {
-    enabled: false, 
+    enabled: true, 
   },
 
   // rate limit settings
